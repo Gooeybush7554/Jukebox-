@@ -15,7 +15,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo -e "\e[1;34m[!] Checking for Jukebox updates...\e[0m"
     git fetch origin >/dev/null 2>&1
     LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse "@{u}")
+    REMOTE=$(git rev-parse"@{u}")
     if [ "$LOCAL" != "$REMOTE" ]; then
         echo -e "\e[1;33m[!] A new Jukebox update is available! Run 'git pull'.\e[0m"
         sleep 2
@@ -27,7 +27,7 @@ play_live_stream() {
     local station_name="$1" 
     local stream_url="$2" 
     
-    echo -e "\e[1;32m[!] Connecting to Live Stream ${station_name}...\e[0m" 
+    echo -e "\e[1;32m[!] Connecting to  ${station_name}...\e[0m" 
     
     # 1. Kill background mpv instances by exact binary name (prevents killing your script)
     pkill mpv 2>/dev/null
@@ -122,6 +122,16 @@ control_mpv() {
     fi
 }
 
+send_mpv() {
+    local cmd="$1"
+    local arg1="$2"
+    local arg2="$3"
+    if [ -S "$SOCKET" ]; then
+        # Properly structures the JSON IPC string for complex multi-argument mpv commands
+        printf '{ "command": ["%s", "%s", "%s"] }\n' "$cmd" "$arg1" "$arg2" | socat - "UNIX-CONNECT:$SOCKET" >/dev/null 2>&1
+    fi
+}
+
 update_library() {
     echo -e "\e[1;33m[!] Scanning & Cleaning Library...\e[0m"
     
@@ -153,7 +163,7 @@ update_library() {
 }
 
 # --- Dependency Installer ---
-dependencies=(mpv socat yt-dlp streamripper sox)
+dependencies=(mpv socat yt-dlp streamripper sox python)
 missing_deps=()
 
 for dep in "${dependencies[@]}"; do
@@ -229,8 +239,9 @@ while true; do
     center_text "\e[1;34m[a]\e[0m Add     \e[1;35m[r]\e[0m Remove     \e[1;32m[dl]\e[0m Download"
     center_text "\e[1;35m[q]\e[0m Queue track   \e[1;34m[sr]\e[0m Search   \e[1;33m[cq]\e[0m Clear Queue" 
     center_text "\e[1;32m[sh]\e[0m Shuffle     \e[1;35m[l]\e[0m Load List.     \e[1;34m[n]\e[0m Next Song"
-    center_text "\e[1;33m[cp]\e[0m Cont-Play  \e[1;32m[rec]\e[0m Record Stream  \e[1;31m[rs]\e[0m Reset MPV"
-    center_text "\e[1;36m[eq]\e[0m EQ FX"
+    center_text "\e[1;33m[cp]\e[0m Cont-Play    \e[1;31m[rs]\e[0m Reset MPV"
+    center_text "\e[1;36m════════════════════════════════════════\e[0m"
+    center_text "\e[1;36m[eq]\e[0m EQ FX   \e[1;32m[rec]\e[0m Record Stream"
     center_text "\e[1;95m[s1]\e[0m Live Stream KTDY      \e[1;95m[s2]\e[0m Live Stream 80s Era"
     center_text "\e[1;95m[s3]\e[0m Live Stream 70s Rock      \e[1;95m[s4]\e[0m Live Bob FM"
     echo -ne "\n\e[1;32m   Selection > \e[0m"
@@ -254,8 +265,8 @@ while true; do
             echo -e "  \e[1;32m4)\e[0m 🌌 Mono Downmix & Equal Balance"
             echo -e "  \e[1;32m5)\e[0m ⏹  Flat EQ (Reset / Bypass)"
             echo ""
-# shellcheck disable=SC2162            
-            read -p " Select FX Profile # : " fx_choice
+            
+            read -r -p " Select FX Profile # : " fx_choice
 
             # Gatekeeper: Prevents applying filters if mpv is offline
             if [ "$STATUS" = "\e[1;31m[○ OFFLINE]\e[0m" ] && [ "$fx_choice" != "5" ]; then
@@ -307,15 +318,18 @@ while true; do
             nohup mpv --no-video --gapless-audio=yes --playlist="$TMP_PL" --input-ipc-server="$SOCKET" > /dev/null 2>&1 &
             sleep 1; rm "$TMP_PL"
             ;;
-        q)
-# shellcheck disable=SC2162        
-            read -p "Track # to Queue: " q_idx
+         q)
+            read -r -p "Track # to Queue: " q_idx
             if [[ "$q_idx" =~ ^[0-9]+$ ]] && [ "$q_idx" -ge 1 ] && [ "$q_idx" -le "$num_stations" ]; then
                 url=$(echo "${stations[$((q_idx-1))]}" | cut -d'|' -f2)
-                if pgrep -x "mpv" >/dev/null; then 
+                
+                if pgrep -x "mpv" >/dev/null && [ -S "$SOCKET" ]; then 
                     send_mpv "loadfile" "$url" "append"
+                    echo -e "\e[1;32m[+] Track added to queue!\e[0m" && sleep 1
                 else 
-                    nohup mpv --no-video --input-ipc-server="$SOCKET" "$url" >/dev/null 2>&1 & 
+                    # If mpv isn't up, spawn it cleanly and pass the first track
+                    track_name=$(echo "${stations[$((q_idx-1))]}" | cut -d'|' -f1)
+                    play_live_stream "$track_name" "$url"
                 fi
             else
                 echo "Invalid selection."; sleep 1
@@ -365,9 +379,8 @@ while true; do
                 echo -e "\e[1;32m[🔴] Spawning Background Stream Capture Engine...\e[0m"
                 echo -e "\e[1;37mSaving tracks to: $REC_DIR\e[0m"
 
-# Update the launch line inside your rec) block to look exactly like this:
-         TIMESTAMP=$(date +"%Y%m%d_%H%M")
-               nohup streamripper "$active_url" -d "$REC_DIR" -a -A -o "KTDY_Rip_$TIMESTAMP" > /dev/null 2>&1 &
+                TIMESTAMP=$(date +"%Y%m%d_%H%M")
+                nohup streamripper "$active_url" -d "$REC_DIR" -a -A -o "KTDY_Rip_$TIMESTAMP" > /dev/null 2>&1 &
                 # Save the tracking PID to our safe socket directory
                 echo $! > "$PID_FILE"
                 sleep 1.5
@@ -375,8 +388,7 @@ while true; do
             ;;
         l)
             echo -e "\e[1;33m[!] Drop a folder path or .txt playlist file here:\e[0m"
-# shellcheck disable=SC2162
-            read -e -p "   Path > " pl_path
+            read -r -p "   Path > " pl_path
             
             # Remove leading/trailing quotes if user dragged and dropped the file
             pl_path="${pl_path%\"}"
@@ -409,30 +421,24 @@ while true; do
         m) echo '{ "command": ["cycle", "mute"] }' | socat - "UNIX-CONNECT:$SOCKET" >/dev/null 2>&1 ;;
         n) echo '{ "command": ["playlist-next"] }' | socat - "UNIX-CONNECT:$SOCKET" >/dev/null 2>&1 ;;
         a) 
-# shellcheck disable=SC2162
-# shellcheck disable=SC2162
-            read -p "Name: " new_name
-# shellcheck disable=SC2162
-            read -p "URL/Path: " new_url
+            read -r -p "Name: " new_name
+            read -r -p "URL/Path: " new_url
             echo "$new_name|$new_url" >> "$JUKEBOX_LIST"
             ;;
         r)
-# shellcheck disable=SC2162
-            read -p "Remove # : " idx
+            read -r -p "Remove # : " idx
             if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "$num_stations" ]; then
                 sed -i "${idx}d" "$JUKEBOX_LIST"
             fi
             ;;  
         u)
-# shellcheck disable=SC2162
-            read -p "Move UP # : " idx
+            read -r -p "Move UP # : " idx
             if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -gt 1 ] && [ "$idx" -le "$num_stations" ]; then
                 python3 -c "import sys; lines = open('$JUKEBOX_LIST').readlines(); i = int('$idx') - 1; lines[i], lines[i-1] = lines[i-1], lines[i]; open('$JUKEBOX_LIST', 'w').writelines(lines)"
             fi
             ;;  
         d)
-# shellcheck disable=SC2162
-            read -p "Move DOWN # : " idx
+            read -r -p "Move DOWN # : " idx
             if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -lt "$num_stations" ]; then
                 python3 -c "import sys; lines = open('$JUKEBOX_LIST').readlines(); i = int('$idx') - 1; lines[i], lines[i+1] = lines[i+1], lines[i]; open('$JUKEBOX_LIST', 'w').writelines(lines)"
             fi
@@ -441,16 +447,15 @@ while true; do
         -) echo '{ "command": ["add", "volume", -15] }' | socat - "UNIX-CONNECT:$SOCKET" >/dev/null 2>&1 ;;
         [1-9]*)
             if [[ "$cmd" =~ ^[0-9]+$ ]] && [ "$cmd" -le "${#stations[@]}" ]; then
+                track_name=$(echo "${stations[$((cmd-1))]}" | cut -d'|' -f1)
                 url=$(echo "${stations[$((cmd-1))]}" | cut -d'|' -f2)
-                pkill mpv
-                rm -f "$SOCKET"
-                nohup mpv --no-video --input-ipc-server="$SOCKET" "$url" > /dev/null 2>&1 &
-                echo "Connecting..."
-                for i in {1..5}; do [ -S "$SOCKET" ] && break; sleep 0.5; done
+                
+                # Diverts both local files and internet streams through your safe loader
+                play_live_stream "$track_name" "$url"
             else
                 echo "Invalid selection."; sleep 1
             fi
-            ;;       
+            ;;
         sr) # Search ONLY the jukebox library file
             echo -e "\e[1;33m[!] Scanning Jukebox Library...\e[0m"
             
@@ -459,85 +464,34 @@ while true; do
             CHOICE=$(cut -d'|' -f1,2 "$JUKEBOX_LIST" | fzf --delimiter='|' --with-nth=1 --tty=ok)
             
             if [ -n "$CHOICE" ]; then
-                # Extract the hidden path destination safely
+                # Extract track title and hidden path destination safely
+                track_name
+                track_name=$(echo "$CHOICE" | cut -d'|' -f1)
                 TRACK_PATH=$(echo "$CHOICE" | cut -d'|' -f2)
                 
-                send_mpv "loadfile" "$TRACK_PATH" "replace"
-                echo "Playing choice!" && sleep 1
+                if pgrep -x "mpv" >/dev/null && [ -S "$SOCKET" ]; then
+                    send_mpv "loadfile" "$TRACK_PATH" "replace"
+                    echo "Playing choice!" && sleep 1
+                else
+                    # Secure fallback: If mpv is dead, fire up the central audio engine
+                    play_live_stream "$track_name" "$TRACK_PATH"
+                fi
             else
                 echo "Search canceled." && sleep 1
             fi
             ;;
-        s1) # Start Live Stream KTDY
-            # Stream URL configuration (Easy to swap out later if the stream changes)
-            STREAM_URL="https://live.amperwave.net/direct/townsquare-ktdyfmaac-ibc3"
-            
-            echo -e "\e[1;32m[!] Connecting to Live Stream KTDY...\e[0m"
-            
-            # 1. Force kill existing background audio engines to avoid overlapping sound
-            pkill -f mpv 2>/dev/null
-            rm -f "$SOCKET"
-            
-            # 2. Launch background MPV instance cleanly without needing nohup.out
-            {
-                mpv --no-video \
-                    --input-ipc-server="$SOCKET" \
-                    --cache=yes \
-                    --cache-secs=10 \
-                    "$STREAM_URL" > /dev/null 2>&1
-            } &
-            
-            # 3. Synchronize socket creation before handing UI back to the menu
-            for i in {1..5}; do 
-                [ -S "$SOCKET" ] && break
-                sleep 0.5
-            done
+         s1) # Live Stream KTDY
+            play_live_stream "KTDY" "https://live.amperwave.net/direct/townsquare-ktdyfmaac-ibc3"
             ;;
-        s2) # Start Live Stream 80s Hairbands
-            echo -e "\e[1;32m[!] Connecting to Live Stream 80s Hairbands...\e[0m"
-            
-            # 1. Kill continuous play/shuffle instances to completely clear the playlist queue
-            pkill mpv
-            rm -f "$SOCKET"
-            
-            # 2. Open a fresh instance dedicated entirely to the live stream URL
-            nohup mpv --no-video \
-                      --input-ipc-server="$SOCKET" \
-                      "https://listen.181fm.com/181-hairband_128k.mp3" > /dev/null 2>&1 &
-            
-            # 3. Wait for socket registration so get_status updates correctly
-            for i in {1..5}; do [ -S "$SOCKET" ] && break; sleep 0.5; done
+        s2) # Live Stream 80s Hairbands
+            play_live_stream "80s Hairbands" "https://listen.181fm.com/181-hairband_128k.mp3"
             ;; 
-        s3) # Start Live Stream 70s Rock
-            echo -e "\e[1;32m[!] Connecting to Live Stream 70s Rock...\e[0m"
-            
-            # 1. Kill continuous play/shuffle instances to completely clear the playlist queue
-            pkill mpv
-            rm -f "$SOCKET"
-            
-            # 2. Open a fresh instance dedicated entirely to the live stream URL
-            nohup mpv --no-video \
-                      --input-ipc-server="$SOCKET" \
-                      "https://listen.181fm.com/181-70s_128k.mp3" > /dev/null 2>&1 &
-            
-            # 3. Wait for socket registration so get_status updates correctly
-            for i in {1..5}; do [ -S "$SOCKET" ] && break; sleep 0.5; done
+        s3) # Live Stream 70s Rock
+            play_live_stream "70s Rock" "https://listen.181fm.com/181-70s_128k.mp3"
             ;; 
-        s4) # Start Live Stream Big FM
-            echo -e "\e[1;32m[!] Connecting to Live Stream Big FM...\e[0m"
-            
-            # 1. Kill continuous play/shuffle instances to completely clear the playlist queue
-            pkill mpv
-            rm -f "$SOCKET"
-            
-            # 2. Open a fresh instance dedicated entirely to the live stream URL
-            nohup mpv --no-video \
-                      --input-ipc-server="$SOCKET" \
-                      "https://ais-sa1.streamon.fm/7164_48k.aac" > /dev/null 2>&1 &
-            
-            # 3. Wait for socket registration so get_status updates correctly
-            for i in {1..5}; do [ -S "$SOCKET" ] && break; sleep 0.5; done
-            ;; 
+        s4) # Live Bob FM
+            play_live_stream "Big FM" "https://ais-sa1.streamon.fm/7164_48k.aac"
+            ;;
         cp) 
             echo -e "\e[1;33m[!] Starting Continuous Playback...\e[0m"
             pkill mpv; rm -f "$SOCKET"
@@ -574,4 +528,4 @@ while true; do
             echo -e "\e[1;31m[!] Invalid selection!\e[0m" && sleep 1
             ;;
     esac
-done 
+done
